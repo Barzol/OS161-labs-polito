@@ -35,6 +35,7 @@
 #include <thread.h>
 #include <current.h>
 #include <syscall.h>
+#include <my_syscall.h>
 
 
 /*
@@ -108,6 +109,40 @@ syscall(struct trapframe *tf)
 		err = sys___time((userptr_t)tf->tf_a0,
 				 (userptr_t)tf->tf_a1);
 		break;
+
+		/*
+		tf è un puntatore a struct trapframe, una struct che vede lo stato dei registri
+		del processore. 
+		tf_a0, a1 etc : 'a' sta per arguments
+		userptr_t : variabile che contiene il puntatore che appartiene all'utente
+		err : la funzione restituisce alla fine un intero, 0 se la systemcall è andata
+		a buon fine, diverso da 0 se c'è un errore
+		*/
+		
+		case SYS_read:
+		err = sys_read(
+			(int)tf -> tf_a0,
+			(userptr_t)tf -> tf_a1,
+			(size_t)tf -> tf_a2,
+			&retval
+		);
+		break;
+
+		case SYS_write:
+		err = sys_write(
+			(int)tf -> tf_a0,
+			(userptr_t)tf -> tf_a1,
+			(size_t)tf -> tf_a2,
+			&retval
+		);
+		break;
+
+		case SYS__exit:
+		err = sys_exit(
+			(int)tf -> tf_a0
+		);
+		break;
+		
 
 	    /* Add stuff here */
 
