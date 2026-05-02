@@ -64,10 +64,28 @@
  */
 static struct spinlock stealmem_lock = SPINLOCK_INITIALIZER;
 
+static struct spinlock freemem_lock = SPINLOCK_INITIALIZER;
+static uint8_t *page_table, free_frames, allocSize;
+static int num_frames, allocTableActive;
+
 void
 vm_bootstrap(void)
 {
-	/* Do nothing. */
+	int i;
+	/* Free frames tracking */
+	num_frames = ((int)ram_getsize())/ PAGE_SIZE;
+
+	free_frames = kmalloc(sizeof(unsigned char)*num_frames);
+	if (free_frames == NULL) return;
+	allocSize = kmalloc(sizeof(unsigned long)*num_frames);
+	if (allocSize == NULL){ free_frames = NULL; return;}
+
+	bzero(page_table, num_frames * sizeof(uint8_t));
+
+	spinlock_acquire(&freemem_lock);
+	allocTableActive = 1;
+	spinlock_release(&freemem_lock);
+	
 }
 
 /*
@@ -96,13 +114,82 @@ getppages(unsigned long npages)
 {
 	paddr_t addr;
 
-	spinlock_acquire(&stealmem_lock);
+	/* try freed pages first */
+	addr = getfreepages(npages);
+	if(addr == 0){
+		spinlock_acquire(&stealmem_lock);
+		addr = ram_stealmem(npages);
+		spinlock_release(&stealmem_lock);
+	}
 
-	addr = ram_stealmem(npages);
+	/* if the pt is not initialized */
+	if(addr != 0 && isTableActive()){
+		spinlock_acquire(&freemem_lock);
+		allocSize[addr/PAGE_SIZE] =npages;
+		spinlock_release(&freemem_lock);
+	}
 
-	spinlock_release(&stealmem_lock);
 	return addr;
 }
+
+/* create getfreepages */
+static
+paddr_t
+getfreepages(unsigned long npages) {
+	paddr_t addr;
+	long i, first, found, np = (long)npages;
+
+	if (!isTableActive()) return 0;
+	
+	spinlock_acquire(&freemem_lock);
+
+	for (i=0, first = found = -1; i<num_frames; i++ ){
+		if (free_frames[i]){
+			if(i == 0 || !free_frames[i-1]){
+				first = i;
+			}
+			if (i-first+1 >= np){
+				found = first;
+				break;
+			}
+		}
+	}
+
+	if(found >= 0){
+		for (i=found; i<found; i++){
+			free_frames[i] = (unsigned char)0;
+		}
+		allocSize[found] = np;
+		addr = (paddr_t)found*PAGE_SIZE;
+	}
+	else{
+		addr = 0;
+	}
+
+	spinlock_release(&freemem_lock);
+
+	return addr;
+}
+
+/* create free pages */
+static int
+freeppages(paddr_t addr, unsigned long npages){
+	long i, first, np=(long)npages;
+
+	if(!isTableActive()) return 0;
+	first = addr/PAGE_SIZE;
+	KASSERT(allocSize != NULL);
+	KASSERT(num_frames > first);
+
+	spinlock_acquire(&freemem_lock);
+	for (i=first; i<first+np; i++){
+		free_frames[i] = (unsigned char)1;
+	}
+	spinlock_release(&freemem_lock);
+
+	return 1;
+}
+
 
 /* Allocate/free some kernel-space virtual pages */
 vaddr_t
@@ -121,7 +208,13 @@ alloc_kpages(unsigned npages)
 void
 free_kpages(vaddr_t addr)
 {
-	/* nothing - leak the memory. */
+	if(isTableActive()){
+		paddr_T paddr = addr - MIPS_KSEG0;
+		long first = paddr/PAGE_SIZE;
+		KASSERT(allocSize != NULL);
+		KASSERT(num_frames > first);
+		freeppages(paddr, allocSize[first]);
+	}
 
 	(void)addr;
 }
