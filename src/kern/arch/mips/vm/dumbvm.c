@@ -66,22 +66,31 @@ static struct spinlock stealmem_lock = SPINLOCK_INITIALIZER;
 
 static struct spinlock freemem_lock = SPINLOCK_INITIALIZER;
 static uint8_t *page_table, free_frames, allocSize;
-static int num_frames, allocTableActive;
+static int num_frames, allocTableActive = 0;
 
 void
 vm_bootstrap(void)
 {
+	/* how many frames can the system manage */
 	int i;
-	/* Free frames tracking */
 	num_frames = ((int)ram_getsize())/ PAGE_SIZE;
 
+	/* each entry is a page, 1 if is occupied, 0 if is free */
 	free_frames = kmalloc(sizeof(unsigned char)*num_frames);
 	if (free_frames == NULL) return;
+	/* array for tracking block dimension */
 	allocSize = kmalloc(sizeof(unsigned long)*num_frames);
+	/* if allocSize is null, free_frames remains allocated (leak) */
 	if (allocSize == NULL){ free_frames = NULL; return;}
 
-	bzero(page_table, num_frames * sizeof(uint8_t));
-
+	/* zero initialization */
+	for (size_t i = 0; i < num_frames; i++)
+	{
+		free_frames[i] = (unsigned char)0;
+		allocSize[i] = 0;
+	}
+	
+	/* kmalloc will use these tables */
 	spinlock_acquire(&freemem_lock);
 	allocTableActive = 1;
 	spinlock_release(&freemem_lock);
@@ -108,30 +117,6 @@ dumbvm_can_sleep(void)
 	}
 }
 
-static
-paddr_t
-getppages(unsigned long npages)
-{
-	paddr_t addr;
-
-	/* try freed pages first */
-	addr = getfreepages(npages);
-	if(addr == 0){
-		spinlock_acquire(&stealmem_lock);
-		addr = ram_stealmem(npages);
-		spinlock_release(&stealmem_lock);
-	}
-
-	/* if the pt is not initialized */
-	if(addr != 0 && isTableActive()){
-		spinlock_acquire(&freemem_lock);
-		allocSize[addr/PAGE_SIZE] =npages;
-		spinlock_release(&freemem_lock);
-	}
-
-	return addr;
-}
-
 /* create getfreepages */
 static
 paddr_t
@@ -143,12 +128,17 @@ getfreepages(unsigned long npages) {
 	
 	spinlock_acquire(&freemem_lock);
 
+	/* first fit research for n contiguous pages */
+	/* there are n contiguos free pages that i can use for allocate npages? */
 	for (i=0, first = found = -1; i<num_frames; i++ ){
+		/* if the frame is free */
 		if (free_frames[i]){
 			if(i == 0 || !free_frames[i-1]){
+				/* start a new sequence */
 				first = i;
 			}
 			if (i-first+1 >= np){
+				/* contiguous pages sequence is sufficiently large */
 				found = first;
 				break;
 			}
@@ -157,9 +147,12 @@ getfreepages(unsigned long npages) {
 
 	if(found >= 0){
 		for (i=found; i<found; i++){
+			/* marks as occupied */
 			free_frames[i] = (unsigned char)0;
 		}
+		/* dimension for future free */
 		allocSize[found] = np;
+		/* index to address conversion */
 		addr = (paddr_t)found*PAGE_SIZE;
 	}
 	else{
@@ -171,17 +164,49 @@ getfreepages(unsigned long npages) {
 	return addr;
 }
 
+
+static
+paddr_t
+getppages(unsigned long npages)
+{
+	paddr_t addr;
+
+	/* try freed pages first */
+	addr = getfreepages(npages);
+	if(addr == 0){
+		/* if there are no free pages, steal with stealmem */
+		spinlock_acquire(&stealmem_lock);
+		addr = ram_stealmem(npages);
+		spinlock_release(&stealmem_lock);
+	
+	}
+
+	/* else we allocate in this free space */
+	if(addr != 0 && isTableActive()){
+		
+		spinlock_acquire(&freemem_lock);
+		allocSize[addr/PAGE_SIZE] =npages;
+		spinlock_release(&freemem_lock);
+	
+	}
+
+	return addr;
+}
+
+
 /* create free pages */
 static int
 freeppages(paddr_t addr, unsigned long npages){
 	long i, first, np=(long)npages;
 
 	if(!isTableActive()) return 0;
+	/* paddress to index conversion */
 	first = addr/PAGE_SIZE;
 	KASSERT(allocSize != NULL);
 	KASSERT(num_frames > first);
 
 	spinlock_acquire(&freemem_lock);
+	/* sets the frames to free */
 	for (i=first; i<first+np; i++){
 		free_frames[i] = (unsigned char)1;
 	}
@@ -197,22 +222,28 @@ alloc_kpages(unsigned npages)
 {
 	paddr_t pa;
 
-	dumbvm_can_sleep();
+	dumbvm_can_sleep(); /* thread can be paused? */
 	pa = getppages(npages);
 	if (pa==0) {
 		return 0;
 	}
+	/* paddress to kvaddress conversion*/
 	return PADDR_TO_KVADDR(pa);
 }
 
 void
 free_kpages(vaddr_t addr)
 {
+	/* if table active */
 	if(isTableActive()){
+		/* kvadd to paddr conversion and offset */
 		paddr_T paddr = addr - MIPS_KSEG0;
+		/* index of corresponding frame */
 		long first = paddr/PAGE_SIZE;
+		/* security checks */
 		KASSERT(allocSize != NULL);
-		KASSERT(num_frames > first);
+		KASSERT(num_frames > first);ù
+		/* marks frames as free */
 		freeppages(paddr, allocSize[first]);
 	}
 
