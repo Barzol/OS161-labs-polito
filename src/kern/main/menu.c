@@ -46,9 +46,6 @@
 #include "opt-sfs.h"
 #include "opt-net.h"
 
-#include "opt-operations.h"
-#include "opt-ascii.h"
-#include "opt-binexa.h"
 
 /*
  * In-kernel menu and command dispatcher.
