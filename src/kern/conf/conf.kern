@@ -351,6 +351,8 @@ optofffile dumbvm   vm/addrspace.c
 
 defoption  net
 #optfile   net    net/net.c
+defoption synch
+defoption use_semaphore_for_lock
 
 #
 # VFS layer

@@ -37,6 +37,9 @@
 
 #include <spinlock.h>
 
+#include "opt-synch.h"
+#include "opt-use_semaphore_for_lock.h"
+
 /*
  * Dijkstra-style semaphore.
  *
@@ -82,8 +85,16 @@ struct lock {
          * adding 2 pointer, one at struct semaphore and one
          * at struct thread for the ownership of the lock
          */
-        struct semaphore *lk_sem;
-        struct thread *volatile lk_owner;
+        # if OPT_SYNCH
+                #if USE_SEMAPHORE_FOR_LOCK
+                        struct semaphore *lk_sem;
+                #else
+                        struct wchan *lk_wchan;
+                #endif
+
+                struct spinlock lk_lock;
+                struct thread *volatile lk_owner;
+        #endif
 };
 
 struct lock *lock_create(const char *name);
@@ -129,8 +140,10 @@ struct cv {
          * wchan (wait channel for threads )
          * spinlock for protecting wchan
          */
-        struct wchan *cv_wchan;
-        struct spinlock cv_lock;
+        #if OPT_SYNCH
+                struct wchan *cv_wchan;
+                struct spinlock cv_lock;
+        #endif
 };
 
 struct cv *cv_create(const char *name);

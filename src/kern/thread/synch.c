@@ -40,6 +40,9 @@
 #include <current.h>
 #include <synch.h>
 
+#include "opt-synch.h"
+#include "opt-use_semaphore_for_lock.h"
+
 ////////////////////////////////////////////////////////////
 //
 // Semaphore.
@@ -159,15 +162,27 @@ lock_create(const char *name)
         // add stuff here as needed
 
         /* Initialize semaphor at 1 */
-        lock -> lk_sem = sem_create(lock -> lk_name, 1);
-        if (lock -> lk_sem == NULL) {
-                kfree(lock -> lk_name);
-                kfree(lock);
-                return NULL;
-        }
+#if OPT_SYNCH
+        #if USE_SEMAPHORE_FOR_LOCK
+                lock -> lk_sem = sem_create(lock -> lk_name, 1);
+                if (lock -> lk_sem == NULL) {
+                        kfree(lock -> lk_name);
+                        kfree(lock);
+                        return NULL;
+                }
+        #else
+                lock -> lk_wchan = wchan_create(lock->lk_name);
+                if (lock -> lk_wchan == NULL) {
+                        kfree(lock -> lk_name);
+                        kfree(lock);
+                        return NULL;
+                }
+        #endif
 
         /* no one owns the lock */
         lock -> lk_owner = NULL;
+        spinlock_init(&lock -> lk_lock);
+#endif
 
         return lock;
 }
@@ -178,9 +193,16 @@ lock_destroy(struct lock *lock)
         KASSERT(lock != NULL);
 
         // add stuff here as needed
-        /* does not destroy the occupied lock */
-        KASSERT(lock->lk_owner == NULL);
-        sem_destroy(lock->lk_sem);
+
+#if OPT_SYNCH
+        spinlock_cleanup(&lock->lk_lock);
+        # if USE_SEMAPHORE_FOR_LOCK
+                /* does not destroy the occupied lock */
+                sem_destroy(lock->lk_sem);
+        #else
+                wchan_destroy(lock->lk_wchan);
+        #endif
+#endif
 
         kfree(lock->lk_name);
         kfree(lock);
@@ -199,14 +221,29 @@ lock_acquire(struct lock *lock)
 	/* Call this (atomically) once the lock is acquired */
 	//HANGMAN_ACQUIRE(&curthread->t_hangman, &lock->lk_hangman);
         
+#if OPT_SYNCH
         /* lock operations */
         KASSERT(lock != NULL);
         KASSERT(!lock_do_i_hold(lock));
+        KASSERT(curthread -> t_in_interrupt == false);
 
-         /* if semaphor is 0, put thread in sleep */
-        P(lock->lk_sem);
+        #if USE_SEMAPHORE_FOR_LOCK
+                /* if semaphor is 0, put thread in sleep */
+                P(lock->lk_sem);
+                spinlock_acquire(&lock -> lk_lock);
+        #else
+                spinlock_acquire(&lock -> lk_lock);
+                while (lock->lk_owner != NULL) { 
+                        wchan_sleep(lock->lk_wchan, &lock->lk_lock);
+                }
+        #endif
+
+        KASSERT(lock -> lk_owner == NULL);
         /* after P we own the thread */
         lock->lk_owner = curthread;
+        spinlock_release(&lock -> lk_lock);
+#endif
+
 }
 
 void
@@ -219,14 +256,22 @@ lock_release(struct lock *lock)
 
         //(void)lock;  // suppress warning until code gets written
 
+#if OPT_SYNCH
         /* do i hold the lock? */
         KASSERT(lock != NULL);
         KASSERT(lock_do_i_hold(lock));
 
-        /* yield the ownership */
+        spinlock_acquire(&lock -> lk_lock);
         lock -> lk_owner = NULL;
-        /* wake up the sleeping thread */
-        V(lock -> lk_sem); 
+
+        #if USE_SEMAPHORE_FOR_LOCK
+                V(lock -> lk_sem);
+        #else
+                wchan_wakeone(lock -> lk_wchan, &lock -> lk_lock);
+        #endif
+
+        spinlock_release(&lock -> lk_lock);
+#endif
 }
 
 bool
@@ -238,8 +283,16 @@ lock_do_i_hold(struct lock *lock)
 
         //return true; // dummy until code gets written
 
-        KASSERT(lock != NULL);
-        return (lock -> lk_owner == curthread);
+#if OPT_SYNCH
+        bool res;
+        spinlock_acquire(&lock -> lk_lock);
+        res = (lock -> lk_owner == curthread);
+        spinlock_release(&lock -> lk_lock);
+        return res;
+#else
+        (void)lock;
+        return true;
+#endif
 }
 
 ////////////////////////////////////////////////////////////
@@ -266,15 +319,16 @@ cv_create(const char *name)
         // add stuff here as needed
 
         /* wait channel creation */
+#if OPT_SYNCH
         cv -> cv_wchan = wchan_create(cv -> cv_name);
         if ( cv -> cv_wchan == NULL){
                 kfree(cv -> cv_name);
                 kfree(cv);
                 return NULL;
         }
-
         /* initialize a control spinlock */
         spinlock_init(&cv -> cv_lock);
+#endif
 
         return cv;
 }
@@ -284,9 +338,11 @@ cv_destroy(struct cv *cv)
 {
         KASSERT(cv != NULL);
 
+#if OPT_SYNCH
         // add stuff here as needed
         spinlock_cleanup(&cv -> cv_lock);
         wchan_destroy(cv -> cv_wchan);
+#endif
 
         kfree(cv->cv_name);
         kfree(cv);
@@ -299,6 +355,7 @@ cv_wait(struct cv *cv, struct lock *lock)
         // (void)cv;    // suppress warning until code gets written
         // (void)lock;  // suppress warning until code gets written
 
+#if OPT_SYNCH
         /* thread has to be the owner of lock */
         KASSERT(cv != NULL);
         KASSERT(lock != NULL);
@@ -313,12 +370,13 @@ cv_wait(struct cv *cv, struct lock *lock)
         spinlock_release(&cv -> cv_lock);
         /* once wakes up, acquire the user lock */
         lock_acquire(lock);
-
+#endif
 }
 
 void
 cv_signal(struct cv *cv, struct lock *lock)
 {
+#if OPT_SYNCH
         // Write this
 	// (void)cv;    // suppress warning until code gets written
 	// (void)lock;  // suppress warning until code gets written
@@ -332,12 +390,14 @@ cv_signal(struct cv *cv, struct lock *lock)
         /* wakes up only one thread */
         wchan_wakeone(cv -> cv_wchan, &cv -> cv_lock);
         spinlock_release(&cv -> cv_lock);
+#endif
 
 }
 
 void
 cv_broadcast(struct cv *cv, struct lock *lock)
 {
+#if OPT_SYNCH
 	// Write this
 	// (void)cv;    // suppress warning until code gets written
 	// (void)lock;  // suppress warning until code gets written
@@ -351,5 +411,5 @@ cv_broadcast(struct cv *cv, struct lock *lock)
         /* wakes up all the threads */
         wchan_wakeall(cv -> cv_wchan, &cv -> cv_lock);
         spinlock_release(&cv -> cv_lock);
-
+#endif
 }
